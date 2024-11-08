@@ -551,3 +551,25 @@ utokvmcopy(pagetable_t pagetable, pagetable_t kpgtbl, uint64 usz, uint64 sz)
   }
   return 0;
 }
+
+void
+vmprint(pagetable_t pagetable,int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      for(int j = 0; j<level; j++){
+        if(j)
+          printf("..");
+        else
+          printf(" ..");
+      }
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, pte, child);
+      vmprint((pagetable_t)child, level+1);
+    } else if(pte & PTE_V){
+      printf(".. .. ..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+    }
+  }
+}
