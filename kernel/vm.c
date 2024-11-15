@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -309,9 +311,10 @@ int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
+  pte_t *npte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,19 +323,30 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    // }
+    if((npte = walk(new, i, 1)) == 0)
+       return -1;
+    if(flags & PTE_W){
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
     }
+    // if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+    //   goto err;
+    // }
+    *npte = *pte;
+    kaddpcount((uint64 *)pa);
   }
   return 0;
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
+  // err:
+  //  uvmunmap(new, 0, i / PGSIZE, 1);
+  //  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -359,6 +373,11 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+    if(iscow(pagetable, va0) == 1){
+      if((pa0 = cow(pagetable, va0)) < 0)
+        return -1;
+    }
+
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
@@ -439,4 +458,53 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+iscow(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  if(va >= MAXVA)
+    return -1;
+  if((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  if((*pte & PTE_V) == 0)
+    return -1;
+  if(*pte & PTE_COW)
+    return 1;
+  return -1;
+}
+
+
+uint64
+cow(pagetable_t pagetable, uint64 va)
+{
+    uint64 pa;
+    char *npa;
+    pte_t *pte;
+
+    va = PGROUNDDOWN(va);
+    if((pte = walk(pagetable, va, 0)) == 0)
+      return -1;
+    if((*pte & PTE_V) == 0)
+      return -1;
+    pa = PTE2PA(*pte);
+    if(getpcount(pa) == 1){
+      *pte |= PTE_W;
+      *pte &= ~PTE_COW;
+      return pa;
+    }
+    else{
+      if((npa = kalloc()) == 0)
+        return -1;
+      memmove(npa, (char*)pa, PGSIZE);
+      *pte &= ~PTE_V;
+      if(mappages(pagetable, va, PGSIZE, (uint64)npa, (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW) != 0){
+        kfree(npa);
+        *pte |= PTE_V; 
+        return -1;
+      }
+      kfree((char*)pa);
+      return (uint64)npa;
+    }
 }
