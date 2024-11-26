@@ -3,8 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,7 +71,48 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  else if(r_scause() == 13 || r_scause() == 15){
+  #ifdef LAB_MMAP
+    uint64 va = r_stval();
+    int i;
+    if(va>=p->sz || va<PGROUNDUP(p->trapframe->sp))
+      exit(-1);
+    for(i=0; i<16; i++){
+      if(va>=p->vma[i].addr && va<p->vma[i].addr+p->vma[i].len){
+        if(p->vma[i].valid)
+          break;
+        else
+          exit(-1);
+      }
+    }
+    if(i == 16)
+      exit(-1);
+    struct file * f = p->vma[i].file;
+    char *pa = kalloc();
+    if(pa == 0)
+      exit(-1);
+    memset(pa,0,PGSIZE);
+    ilock(f->ip);
+    int offset = p->vma[i].offset + va - p->vma[i].addr;
+    if(readi(f->ip, 0, (uint64)pa, offset, PGSIZE) <= 0){
+      iunlock(f->ip);
+      kfree(pa);
+      exit(-1);
+    }
+    iunlock(f->ip);
+    int pte_flags = PTE_U;
+    if(p->vma[i].prot & PROT_READ) pte_flags |= PTE_R;
+    if(p->vma[i].prot & PROT_WRITE) pte_flags |= PTE_W;
+    if(p->vma[i].prot & PROT_EXEC) pte_flags |= PTE_X;
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, pte_flags) != 0){
+      kfree(pa);
+      exit(-1);
+    }
+    #endif
+  }
+  
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

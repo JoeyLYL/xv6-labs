@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -133,6 +134,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  memset(&p->vma, 0, sizeof(p->vma));
 
   return p;
 }
@@ -280,6 +283,7 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -295,6 +299,13 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  for(i = 0; i < 16; ++i) {
+    if(p->vma[i].valid) {
+      memmove(&np->vma[i], &p->vma[i], sizeof(p->vma[i]));
+      filedup(p->vma[i].file);
+    }
+  }
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -350,6 +361,17 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for(int i = 0; i < 16; ++i) {
+    if(p->vma[i].valid) {
+      if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE) != 0) {
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].len);
+      }
+      fileclose(p->vma[i].file);
+      uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].len / PGSIZE, 1);
+      p->vma[i].valid = 0;
     }
   }
 
